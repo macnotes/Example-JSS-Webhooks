@@ -1,0 +1,289 @@
+<?php
+
+// See here for impementation/explanation
+// https://macnotes.wordpress.com/2017/02/08/setting-up-a-jamf-casperwebhook-with-php-to-set-the-site-on-a-newly-enrolled-device/
+
+
+// This is triggered when an enrollment webhook is recieved. 
+
+
+// //////////////////////////////////////////////////////////////
+// ///////////  Start of user-defined runtime vars  /////////////
+// //////////////////////////////////////////////////////////////
+
+
+// Only allow me and the US Jamf Cloud IPs
+$allowedIncomingIPs = array(
+	"127.0.0.1", 
+	"54.208.14.206", 
+	"54.208.84.215", 
+	"52.1.62.94",
+	"52.1.215.211"); 	
+
+// API USER needs Read/Write permissions on Computers and Mobile_Devices
+$jss_URL = "https://mbp.local:8443";   // Don't include trailing slash
+$jssUser = "sitescript";
+$jssPass = "yourpasswordhere";
+
+
+// //////////////////////////////////////////////////////////////
+// ////////////  End of user-defined runtime vars  //////////////
+// //////////////////////////////////////////////////////////////
+
+
+$action = isset($_SERVER['QUERY_STRING']) ? $_SERVER['QUERY_STRING'] : '';
+
+// echo "Action: ", $action, "<br />", "\r";
+
+
+
+//checkforHC($action, $allowedIncomingIPs, $jss_URL);
+firewall($allowedIncomingIPs, $action);
+webhook($jss_URL, $jssUser, $jssPass, $action);
+
+
+
+
+
+
+
+// //////////////////////////////////////////////////////////////
+// //////////////////////   Functions   /////////////////////////
+// //////////////////////////////////////////////////////////////
+
+
+function checkforHC($action, $allowedIncomingIPs, $jss_URL) {
+	// Healthcheck: https://phppageurl?hc
+	// [bia] == bad incoming address : the request was not from a permitted IP address
+	// [njs] == no jss : network error connecting to jss healthcheck page
+	// [jsn] == json : error message returned by jss healthcheck page
+	// []    == OK : All good returned by jss healthcheck page
+	if ($action = "hc") {
+		if (!in_array($_SERVER['REMOTE_ADDR'], $allowedIncomingIPs) && !in_array($_SERVER["HTTP_X_FORWARDED_FOR"], $allowedIncomingIPs)) {
+			echo "[bia]";
+			exit();
+		} 
+		$ch = curl_init("${jss_URL}/healthCheck.html");
+		curl_setopt($ch, CURLOPT_SSL_VERIFYPEER,false);   // For testing only... use a real cert or install CURLOPT_CAINFO file for php. 		
+		//		curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);  
+		if( ! $hcBody = curl_exec($ch)) {
+ 			echo "[njs]";
+ 			exit();
+ 		}
+		curl_close($ch);
+		exit();
+	}	// if ($action = "hc") 
+} //function checkforHC($action, $allowedIncomingIPs, $jss_URL) {
+
+
+
+
+function firewall($allowedIncomingIPs, $action) {
+	//Application level firewall. Can set network, OS, and .htaccess/mod rewrite as well. 
+	if(!in_array($_SERVER['REMOTE_ADDR'], $allowedIncomingIPs) && !in_array($_SERVER["HTTP_X_FORWARDED_FOR"], $allowedIncomingIPs)) {
+    syslog(LOG_ERR, "[siteset][Security] Unauthorized client: $access {$_SERVER['REMOTE_ADDR']} ({$_SERVER['HTTP_USER_AGENT']})");
+		header("Location: http://school.edu/Pages/home.aspx"); //redirect
+		exit();
+	} else {
+ 		if ($action === "debug") {
+		 	echo "[OK] Valid incoming IP", "<br />", PHP_EOL;
+		}
+ 	} 
+}
+
+
+
+
+function webhook ($jss_URL, $jssUser, $jssPass, $action) {
+
+
+	// JSON Examples...
+	
+	// {
+	//   "webhook": {
+	//     "id": 1,
+	//     "name": "ComputerAdded Webhook",
+	//     "webhookEvent": "ComputerAdded"
+	//   },
+	//   "event": {
+	//     "udid": "",
+	//     "deviceName": "",
+	//     "model": "",
+	//     "macAddress": "",
+	//     "alternateMacAddress": "",
+	//     "serialNumber": "",
+	//     "osVersion": "",
+	//     "osBuild": "",
+	//     "userDirectoryID": "-1",
+	//     "username": "",
+	//     "realName": "",
+	//     "emailAddress": "",
+	//     "phone": "",
+	//     "position": "",
+	//     "department": "",
+	//     "building": "",
+	//     "room": "",
+	//     "jssID": 1
+	//   }
+	// }
+	
+	// {
+	//   "webhook": {
+	//     "id": 11,
+	//     "name": "MobileDeviceEnrolled Webhook",
+	//     "webhookEvent": "MobileDeviceEnrolled"
+	//   },
+	//   "event": {
+	//     "udid": "",
+	//     "deviceName": "",
+	//     "version": "",
+	//     "model": "",
+	//     "bluetoothMacAddress": "",
+	//     "wifiMacAddress": "",
+	//     "imei": "",
+	//     "icciID": "",
+	//     "product": null,
+	//     "serialNumber": "",
+	//     "userDirectoryID": "-1",
+	//     "room": "",
+	//     "osVersion": "",
+	//     "osBuild": "",
+	//     "modelDisplay": "",
+	//     "username": "",
+	//     "jssID": 1
+	//   }
+	// }
+
+	$json = file_get_contents('php://input'); 
+	$obj = json_decode($json, TRUE);  // TRUE == Make associative array
+	$deviceType = $obj["webhook"]["webhookEvent"];
+	$deviceID   = $obj["event"]["jssID"];
+	$deviceName = $obj["event"]["deviceName"];
+	$deviceSN   = $obj["event"]["serialNumber"];
+	$deviceSite = $obj["event"]["room"];
+
+	if ($action === "debug") {
+	  print_r($obj);
+		echo "\r";
+	}
+	
+	// JSON Parse error handling...
+	$constants = get_defined_constants(true);
+	$json_errors = array();
+	foreach ($constants["json"] as $name => $value) {
+			if (!strncmp($name, "JSON_ERROR_", 11)) {
+					$json_errors[$value] = $name;
+			}
+	}
+	if ( $json_errors[json_last_error()] != "JSON_ERROR_NONE" ) {
+		if ($action === "debug") {
+			echo 'JSON decode error: ', $json_errors[json_last_error()], PHP_EOL, PHP_EOL;
+		}
+    syslog(LOG_ERR, '[siteset][Error] JSON decode error: ' . $json_errors[json_last_error()]);
+	}
+	
+	if ($action === "debug") {
+		echo "List of parsed json values:", PHP_EOL;
+		printf("[log] var: %s<br />\r\n[log] var: %s<br />\r\n[log] var: %s<br />\r\n[log] var: %s<br />\r\n[log] var: %s<br />\r\n", $deviceType, $deviceID, $deviceName, $deviceSN, $deviceSite);	
+		echo PHP_EOL;
+	}
+  syslog(LOG_ERR, "[siteset][Info] $deviceType Webhook received, ID: $deviceID, Name: $deviceName, SN: $deviceSN, Site: $deviceSite");
+	
+
+	if ( $deviceType == "MobileDeviceEnrolled" ) {	
+		$url	= "$jss_URL/JSSResource/mobiledevices/id/$deviceID";
+		$xml="<mobile_device>
+			<general>
+				<site>
+					<name>$deviceSite</name>
+				</site>
+			</general>
+			<extension_attributes>
+				<extension_attribute>
+					<name>Site</name>
+					<value>$deviceSite</value>
+				</extension_attribute>
+			</extension_attributes>
+		</mobile_device>";
+
+	} elseif ( $deviceType == "ComputerAdded" ) {
+		$url	= "$jss_URL/JSSResource/Computers/id/$deviceID";
+		$xml="<computer>
+			<general>
+				<site>
+					<name>$deviceSite</name>
+				</site>
+			</general>
+			<extension_attributes>
+				<extension_attribute>
+					<name>Site</name>
+					<value>$deviceSite</value>
+				</extension_attribute>
+			</extension_attributes>
+		</computer>";
+			
+	} else {
+		if ($action === "debug") {
+			echo 'No handler for WebHook event', PHP_EOL, PHP_EOL;
+		}
+    syslog(LOG_ERR, "[siteset][Error] Invalid webhook event type");
+		exit();
+		
+	}	// if ( $deviceType == "MobileDeviceEnrolled" )
+	
+	
+	
+	// Setup and run cURL to call jss api for site assignment
+	$ch = curl_init();
+  curl_setopt($ch, CURLOPT_URL, $url);
+	curl_setopt($ch, CURLOPT_HTTPAUTH, CURLAUTH_ANY ) ;		// eauthentification method to use  CURLAUTH_BASIC
+	curl_setopt($ch, CURLOPT_USERPWD, "$jssUser:$jssPass"); // Username and password of the admin JSS accountl
+	curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);					// Return as string
+	curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'PUT');					// REST Method 
+	curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);				// For testing only... use a real cert or install CURLOPT_CAINFO file for php. 
+	curl_setopt($ch, CURLOPT_HTTPHEADER, array('Content-Type: application/xml','Accept: application/json'));
+	curl_setopt($ch, CURLOPT_POSTFIELDS, $xml);
+	$output = curl_exec($ch);
+
+	// Error handling
+	if( $errno = curl_errno($ch) ) {
+		$error_message = curl_strerror($errno);
+		if ($action === "debug") {
+			echo 'API call returned transport error : ', $errno, ": ", $error_message , "<br />", PHP_EOL;
+		}
+    syslog(LOG_ERR, "[siteset][Error] API call returned transport error : $errno : $error_message");
+  } else {
+    
+		$status = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+		switch ($status) {
+			case 200:
+				$status_t = 'OK'; break;
+			case 201:
+				$status_t = 'Update Sucessful'; break;
+			case 400:
+				$status_t = 'API request failed, check XML?'; break;
+			case 401:
+				$status_t = 'API auth failed, check username and password?'; break;
+			case 403:
+				$status_t = 'API request failed. Check your api user\'s permissions?'; break;
+			case 404:
+				$status_t = 'API request failed. Check the resource in your URL?'; break;
+			case 409:
+				$status_t = 'API request failed. Check the the XML for missing or duplicate values?'; break;
+			case 500:
+				$status_t = 'API request failed. Your request may be OK but there was an internal server error.'; break;
+			default:
+				echo 'Unexpected HTTP code: ', $http_code, "\n";
+		}
+		curl_close($ch);
+
+		if ($action === "debug") {
+			echo "cUrl HTTP Response Code was ", $status, ' : ', $status_t, "<br />", PHP_EOL;
+			echo "<B>Response body:</B><br />", PHP_EOL, "<pre>", htmlspecialchars(str_replace('<?xml version="1.0" encoding="UTF-8"?>', '', $output)), "</pre>", PHP_EOL;
+		}
+	  syslog(LOG_ERR, "[siteset][${status}] $status_t for $deviceType s/n $deviceSN");
+	}
+}
+
+
+?>
